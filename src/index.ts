@@ -37,16 +37,18 @@ type Plugin = {
   repoUrl: string;
   stars: number;
   updated: string;
+  /** Live tool names from the server itself. null = server didn't answer (offline). */
+  tools: string[] | null;
 };
 
 /** Renders even if GitHub is unreachable. */
 const FALLBACK: Plugin[] = [
-  { name: "citation-guard", title: "Citation Guard", description: "Verifies references against live registries — catches AI-hallucinated citations, dead DOIs, retracted papers and duplicates.", mcpUrl: `https://citation-guard.${ACCOUNT}.workers.dev/mcp`, repoUrl: `https://github.com/${OWNER}/citation-guard`, stars: 0, updated: "" },
-  { name: "thinking-tools", title: "Thinking Tools", description: "Five reasoning protocols: debate, red team, argument audit, threat model, study sanity.", mcpUrl: `https://thinking-tools.${ACCOUNT}.workers.dev/mcp`, repoUrl: `https://github.com/${OWNER}/thinking-tools`, stars: 0, updated: "" },
-  { name: "plain-english", title: "Plain English", description: "Decodes contracts, leases, ToS and policies into language you can act on.", mcpUrl: `https://plain-english.${ACCOUNT}.workers.dev/mcp`, repoUrl: `https://github.com/${OWNER}/plain-english`, stars: 0, updated: "" },
-  { name: "learn-anything", title: "Learn Anything", description: "Turns any topic into a real lesson: intuition, worked example, misconceptions, practice, spaced repetition.", mcpUrl: `https://learn-anything.${ACCOUNT}.workers.dev/mcp`, repoUrl: `https://github.com/${OWNER}/learn-anything`, stars: 0, updated: "" },
-  { name: "pro-prompter", title: "Pro Prompter", description: "Rewrites a rough request into a FAANG-grade prompt and runs it — 15 specialised task types.", mcpUrl: `https://pro-prompter.${ACCOUNT}.workers.dev/mcp`, repoUrl: `https://github.com/${OWNER}/pro-prompter`, stars: 0, updated: "" },
-  { name: "mcp-toolkit", title: "MCP Toolkit", description: "The basics AI keeps fumbling: real current time in any timezone, exact math, precise word counts.", mcpUrl: `https://mcp-toolkit.${ACCOUNT}.workers.dev/mcp`, repoUrl: `https://github.com/${OWNER}/mcp-toolkit`, stars: 0, updated: "" },
+  { name: "citation-guard", title: "Citation Guard", description: "Verifies references against live registries — catches AI-hallucinated citations, dead DOIs, retracted papers and duplicates.", mcpUrl: `https://citation-guard.${ACCOUNT}.workers.dev/mcp`, repoUrl: `https://github.com/${OWNER}/citation-guard`, stars: 0, updated: "", tools: ["verify_citations", "check_doi"] },
+  { name: "thinking-tools", title: "Thinking Tools", description: "Five reasoning protocols: debate, red team, argument audit, threat model, study sanity.", mcpUrl: `https://thinking-tools.${ACCOUNT}.workers.dev/mcp`, repoUrl: `https://github.com/${OWNER}/thinking-tools`, stars: 0, updated: "", tools: ["debate", "red_team", "audit_argument", "threat_model", "check_study"] },
+  { name: "plain-english", title: "Plain English", description: "Decodes contracts, leases, ToS and policies into language you can act on.", mcpUrl: `https://plain-english.${ACCOUNT}.workers.dev/mcp`, repoUrl: `https://github.com/${OWNER}/plain-english`, stars: 0, updated: "", tools: ["decode"] },
+  { name: "learn-anything", title: "Learn Anything", description: "Turns any topic into a real lesson: intuition, worked example, misconceptions, practice, spaced repetition.", mcpUrl: `https://learn-anything.${ACCOUNT}.workers.dev/mcp`, repoUrl: `https://github.com/${OWNER}/learn-anything`, stars: 0, updated: "", tools: ["curriculum"] },
+  { name: "pro-prompter", title: "Pro Prompter", description: "Rewrites a rough request into a FAANG-grade prompt and runs it — 15 specialised task types.", mcpUrl: `https://pro-prompter.${ACCOUNT}.workers.dev/mcp`, repoUrl: `https://github.com/${OWNER}/pro-prompter`, stars: 0, updated: "", tools: ["pro_prompt", "refine_prompt", "recall_prompts", "clear_memory"] },
+  { name: "mcp-toolkit", title: "MCP Toolkit", description: "The basics AI keeps fumbling: real current time, exact math, word counts, regex actually tested, exact diff, token estimator, JSON/YAML validator, JWT decoder.", mcpUrl: `https://mcp-toolkit.${ACCOUNT}.workers.dev/mcp`, repoUrl: `https://github.com/${OWNER}/mcp-toolkit`, stars: 0, updated: "", tools: ["get_current_time", "calculate", "word_count", "test_regex", "diff_text", "estimate_tokens", "validate_data", "decode_jwt"] },
 ];
 
 const ICONS: Record<string, string> = {
@@ -85,7 +87,63 @@ function mapRepo(r: GhRepo): Plugin {
     repoUrl: r.html_url,
     stars: r.stargazers_count ?? 0,
     updated: r.pushed_at ?? "",
+    tools: null,
   };
+}
+
+/** A tool result may arrive as plain JSON or as an SSE stream — handle both. */
+function parseRpc(body: string): { result?: { tools?: Array<{ name: string }> } } | null {
+  const t = body.trim();
+  if (t.startsWith("{")) {
+    try { return JSON.parse(t); } catch { return null; }
+  }
+  for (const line of t.split(/\r?\n/)) {
+    if (line.startsWith("data:")) {
+      try {
+        const o = JSON.parse(line.slice(5).trim());
+        if (o && o.result) return o;
+      } catch { /* keep scanning */ }
+    }
+  }
+  return null;
+}
+
+/**
+ * Read a plugin's tool list from its repo's `mcp.json` manifest.
+ *
+ * WHY NOT PROBE THE LIVE SERVER? Because Cloudflare forbids it. A deployed
+ * Worker fetching another Worker on the same account returns error 1042
+ * ("Worker tried to fetch from another Worker on the same zone"). Verified:
+ * the probe works from local dev and fails in production with exactly that.
+ * Service bindings would fix it but need per-plugin config, which would break
+ * zero-config auto-discovery. raw.githubusercontent.com is a different origin,
+ * so this works — and it keeps the manifest next to the code that defines it.
+ *
+ * Manifest shape:  { "tools": ["tool_a", "tool_b"] }
+ * Missing file -> null -> the card simply shows no chips.
+ */
+async function fetchManifestTools(owner: string, repo: string): Promise<string[] | null> {
+  try {
+    const r = await fetch(`https://raw.githubusercontent.com/${owner}/${repo}/HEAD/mcp.json`, {
+      headers: { "user-agent": UA },
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!r.ok) return null;
+    const j = (await r.json()) as { tools?: unknown };
+    return Array.isArray(j.tools) && j.tools.every((t) => typeof t === "string") ? (j.tools as string[]) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Fetch manifests a few at a time — Workers allow only 6 concurrent connections. */
+async function attachTools(plugins: Plugin[]): Promise<Plugin[]> {
+  const out: Plugin[] = [];
+  for (let i = 0; i < plugins.length; i += 3) {
+    const batch = plugins.slice(i, i + 3);
+    out.push(...(await Promise.all(batch.map(async (p) => ({ ...p, tools: await fetchManifestTools(OWNER, p.name) })))));
+  }
+  return out;
 }
 
 async function getPlugins(ctx: ExecutionContext, bypassCache = false): Promise<{ plugins: Plugin[]; live: boolean }> {
@@ -103,8 +161,11 @@ async function getPlugins(ctx: ExecutionContext, bypassCache = false): Promise<{
     const r = await fetch(url, { headers: { "user-agent": UA, accept: "application/vnd.github+json" } });
     if (r.ok) {
       const j = (await r.json()) as { items?: GhRepo[] };
-      const plugins = (j.items ?? []).filter((x) => !x.archived).map(mapRepo);
-      if (plugins.length > 0) {
+      const discovered = (j.items ?? []).filter((x) => !x.archived).map(mapRepo);
+      if (discovered.length > 0) {
+        // Ask each live server what it actually exposes, so the page shows the
+        // real tool surface (and flags anything that's down) rather than a guess.
+        const plugins = await attachTools(discovered);
         const body = JSON.stringify(plugins);
         ctx.waitUntil(
           cache.put(key, new Response(body, { headers: { "content-type": "application/json", "cache-control": `max-age=${CACHE_SECONDS}` } })),
@@ -122,14 +183,23 @@ function esc(s: string): string {
   return s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c] as string));
 }
 
+function toolChips(p: Plugin): string {
+  // null = the repo has no mcp.json manifest yet, not an outage. Show nothing.
+  if (!p.tools || p.tools.length === 0) return "";
+  return `<div class="tools">${p.tools.map((t) => `<code class="chip">${esc(t)}</code>`).join("")}</div>`;
+}
+
 function card(p: Plugin, i: number): string {
+  const n = p.tools?.length ?? 0;
   return `<article class="card">
   <div class="card-top">
     <span class="icon" aria-hidden="true">${iconFor(p.name, i)}</span>
     <h3>${esc(p.title)}</h3>
+    ${n > 0 ? `<span class="count" title="Live tool count, read from the server">${n} tool${n === 1 ? "" : "s"}</span>` : ""}
     ${p.stars > 0 ? `<span class="stars" title="GitHub stars">★ ${p.stars}</span>` : ""}
   </div>
   <p class="desc">${esc(p.description)}</p>
+  ${toolChips(p)}
   <div class="url-row">
     <code class="url" id="u${i}">${esc(p.mcpUrl)}</code>
     <button class="copy" data-target="u${i}" aria-label="Copy connector URL for ${esc(p.title)}">Copy</button>
@@ -142,6 +212,7 @@ function card(p: Plugin, i: number): string {
 }
 
 function page(plugins: Plugin[], live: boolean): string {
+  const toolTotal = plugins.reduce((n, p) => n + (p.tools?.length ?? 0), 0);
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -184,7 +255,14 @@ function page(plugins: Plugin[], live: boolean): string {
   .icon { font-size: 1.5rem; }
   .card h3 { margin: 0; font-size: 1.1rem; flex: 1; }
   .stars { color: var(--muted); font-size: .8rem; }
+  .count { background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent);
+           border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+           padding: .1rem .45rem; border-radius: 999px; font-size: .7rem; white-space: nowrap; }
   .desc { margin: 0; color: var(--muted); font-size: .92rem; flex: 1; }
+  .tools { display: flex; flex-wrap: wrap; gap: .3rem; }
+  .chip { font-family: var(--mono); font-size: .68rem; background: var(--bg); border: 1px solid var(--line);
+          border-radius: 6px; padding: .15rem .4rem; color: var(--muted); }
+  .chip.off { color: #e0574b; border-color: #e0574b; font-family: inherit; }
   .url-row { display: flex; gap: .4rem; align-items: stretch; }
   .url { font-family: var(--mono); font-size: .74rem; background: var(--bg); border: 1px solid var(--line);
          border-radius: 8px; padding: .5rem .6rem; overflow-x: auto; white-space: nowrap; flex: 1; }
@@ -213,7 +291,7 @@ function page(plugins: Plugin[], live: boolean): string {
     <p class="sub">Superpowers for the AI you already use. Open-source, no signup, no API key —
     and <strong>zero extra credits</strong>: they run on your own Claude or ChatGPT.</p>
     <div class="badges">
-      <span class="badge live">● ${plugins.length} plugins live</span>
+      <span class="badge live">● ${plugins.length} plugins${toolTotal > 0 ? ` · ${toolTotal} tools` : ""} live</span>
       <span class="badge">Claude + ChatGPT</span>
       <span class="badge">MIT licensed</span>
       <span class="badge">${live ? "auto-updating" : "cached list"}</span>
