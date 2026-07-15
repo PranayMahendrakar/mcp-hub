@@ -21,7 +21,9 @@ const OWNER = "PranayMahendrakar";
 const TOPIC = "mcp-plugin";
 const ACCOUNT = "mahendrakarpranay"; // workers.dev subdomain, for URL fallback
 const UA = "mcp-hub/1.0 (+https://github.com/PranayMahendrakar/mcp-hub)";
-const CACHE_SECONDS = 3600;
+// 15 min: GitHub allows 60 unauthenticated calls/hour, so refreshing 4x/hour is
+// well inside budget while keeping edits to repo metadata visible quickly.
+const CACHE_SECONDS = 900;
 
 interface Env {
   ASSETS?: unknown;
@@ -86,13 +88,15 @@ function mapRepo(r: GhRepo): Plugin {
   };
 }
 
-async function getPlugins(ctx: ExecutionContext): Promise<{ plugins: Plugin[]; live: boolean }> {
+async function getPlugins(ctx: ExecutionContext, bypassCache = false): Promise<{ plugins: Plugin[]; live: boolean }> {
   const cache = (caches as unknown as { default: Cache }).default;
   // Bump this version to invalidate the cached GitHub response after a change.
-  const key = new Request("https://mcp-hub.internal/plugins-v2");
-  const hit = await cache.match(key);
-  if (hit) {
-    return { plugins: (await hit.json()) as Plugin[], live: true };
+  const key = new Request("https://mcp-hub.internal/plugins-v3");
+  if (!bypassCache) {
+    const hit = await cache.match(key);
+    if (hit) {
+      return { plugins: (await hit.json()) as Plugin[], live: true };
+    }
   }
   try {
     const url = `https://api.github.com/search/repositories?q=${encodeURIComponent(`user:${OWNER} topic:${TOPIC}`)}&sort=updated&per_page=50`;
@@ -284,16 +288,19 @@ ${plugins.map((p, i) => card(p, i)).join("\n")}
 export default {
   async fetch(request: Request, _env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
-    const { plugins, live } = await getPlugins(ctx);
+    // ?refresh=1 forces a fresh GitHub read — useful right after tagging a new repo.
+    const bypass = url.searchParams.has("refresh");
+    const { plugins, live } = await getPlugins(ctx, bypass);
 
     if (url.pathname === "/api/plugins") {
       return new Response(JSON.stringify({ count: plugins.length, source: live ? "github" : "fallback", plugins }, null, 2), {
-        headers: { "content-type": "application/json; charset=utf-8", "access-control-allow-origin": "*", "cache-control": "public, max-age=600" },
+        headers: { "content-type": "application/json; charset=utf-8", "access-control-allow-origin": "*", "cache-control": "no-cache" },
       });
     }
     if (url.pathname === "/") {
       return new Response(page(plugins, live), {
-        headers: { "content-type": "text/html; charset=utf-8", "cache-control": "public, max-age=300" },
+        // Short browser cache so a newly-added plugin shows up promptly.
+        headers: { "content-type": "text/html; charset=utf-8", "cache-control": "public, max-age=60" },
       });
     }
     return new Response("Not found", { status: 404 });
