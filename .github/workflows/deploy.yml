@@ -1,0 +1,31 @@
+# Auto-deploy to Cloudflare Workers on every push to main.
+#
+# One-time setup:
+#   1. Create a Cloudflare API token: dashboard > My Profile > API Tokens >
+#      "Edit Cloudflare Workers" template.
+#   2. Add it as a GitHub repo secret named CLOUDFLARE_API_TOKEN
+#      (Settings > Secrets and variables > Actions > New repository secret).
+#
+# Uses the project's own wrangler (from devDependencies) so the deployed version
+# matches what you test locally, and authenticates via the token env var.
+
+name: Deploy to Cloudflare Workers
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - name: Deploy
+        run: npx wrangler deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}

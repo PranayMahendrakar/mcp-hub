@@ -1,0 +1,7 @@
+﻿{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "mcp-hub",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-03-10",
+  "observability": { "enabled": true }
+}
