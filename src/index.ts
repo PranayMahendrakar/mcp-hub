@@ -129,7 +129,11 @@ async function fetchManifestTools(owner: string, repo: string): Promise<string[]
       signal: AbortSignal.timeout(5000),
     });
     if (!r.ok) return null;
-    const j = (await r.json()) as { tools?: unknown };
+    // Read as text and strip a UTF-8 BOM before parsing: JSON.parse throws on a
+    // leading U+FEFF, and editors on Windows add one routinely. A contributor's
+    // BOM shouldn't silently blank their tools.
+    const raw = (await r.text()).replace(/^﻿/, "").trim();
+    const j = JSON.parse(raw) as { tools?: unknown };
     return Array.isArray(j.tools) && j.tools.every((t) => typeof t === "string") ? (j.tools as string[]) : null;
   } catch {
     return null;
